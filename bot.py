@@ -4,6 +4,8 @@
 медицинскими и автомобильными вопросами.
 """
 import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from google import genai
 from google.genai import types
 from telegram import Update
@@ -42,6 +44,31 @@ if ALLOWED_USERS:
     allowed_user_ids = {
         int(uid.strip()) for uid in ALLOWED_USERS.split(",") if uid.strip()
     }
+
+
+# ─── Health Check сервер для Koyeb ──────────────────────────────────
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+    """Простой HTTP-обработчик для health check."""
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, format, *args):
+        pass  # Не засоряем логи health check запросами
+
+
+def start_health_server():
+    """Запускает HTTP-сервер для health check на порту 8000."""
+    server = HTTPServer(("0.0.0.0", 8000), HealthHandler)
+    server.serve_forever()
+
+
+# ─── Логика бота ─────────────────────────────────────────────────────
 
 
 def is_user_allowed(user_id: int) -> bool:
@@ -91,18 +118,10 @@ async def get_gemini_response(
 ) -> str:
     """
     Отправляет запрос к Google Gemini API и возвращает ответ.
-
-    Args:
-        user_message: Текст сообщения пользователя
-        context: Контекст диалога Telegram
-
-    Returns:
-        Текст ответа от Gemini
     """
     add_to_history(context, "user", user_message)
     history = get_chat_history(context)
 
-    # Формируем содержимое для Gemini
     contents = build_gemini_contents(history)
 
     try:
@@ -124,10 +143,8 @@ async def get_gemini_response(
                 "Попробуйте переформулировать вопрос."
             )
 
-        # Добавляем ответ в историю
         add_to_history(context, "assistant", assistant_message)
 
-        # Логируем использование токенов
         if response.usage_metadata:
             logger.info(
                 f"Токены: вход={response.usage_metadata.prompt_token_count}, "
@@ -146,7 +163,6 @@ async def get_gemini_response(
                 "Пожалуйста, подождите пару минут и попробуйте снова."
             )
         elif "400" in error_msg or "INVALID" in error_msg:
-            # Сбрасываем историю — возможно, она стала слишком длинной
             context.user_data["history"] = [
                 {"role": "user", "content": user_message}
             ]
@@ -259,13 +275,10 @@ async def handle_message(
     if not user_message or not user_message.strip():
         return
 
-    # Показываем, что бот «печатает»
     await update.message.chat.send_action("typing")
 
-    # Получаем ответ от Gemini
     bot_response = await get_gemini_response(user_message, context)
 
-    # Логируем обращение
     log_conversation(
         user_id=user.id,
         username=user.username,
@@ -274,14 +287,12 @@ async def handle_message(
         bot_response=bot_response,
     )
 
-    # Telegram ограничивает сообщения 4096 символами
     if len(bot_response) <= 4096:
         try:
             await update.message.reply_text(
                 bot_response, parse_mode="Markdown"
             )
         except Exception:
-            # Если Markdown не парсится — отправляем без форматирования
             await update.message.reply_text(bot_response)
     else:
         chunks = split_message(bot_response, 4096)
@@ -331,9 +342,6 @@ def split_message(text: str, max_length: int = 4096) -> list[str]:
     return chunks
 
 
-# ─── Обработчик нетекстовых сообщений ────────────────────────────────
-
-
 async def handle_non_text(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
@@ -364,10 +372,14 @@ def main():
             "Установите переменную окружения GEMINI_API_KEY."
         )
 
+    # Запускаем health check сервер в отдельном потоке
+    health_thread = threading.Thread(target=start_health_server, daemon=True)
+    health_thread.start()
+    logger.info("Health check сервер запущен на порту 8000")
+
     # Создаём приложение бота
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Регистрируем обработчики
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("new", new_command))
