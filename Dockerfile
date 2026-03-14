@@ -12,5 +12,8 @@ COPY . .
 # Создаём директорию для логов
 RUN mkdir -p logs
 
+# Порт для health check (Koyeb проверяет здоровье приложения)
+EXPOSE 8000
+
 # Запускаем бота
 CMD ["python", "bot.py"]
